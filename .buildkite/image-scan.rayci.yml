@@ -23,6 +23,23 @@
 # annotation for .buildkite/hooks/post-command to post.
 group: image scan
 steps:
+  # THROWAWAY (sai-miduthuri/trivy-timeout-check only): how a timed-out
+  # soft_fail step behaves. Never merged.
+  - label: ":hourglass: trivy: timeout check (throwaway)"
+    key: trivy_timeout_check
+    if: build.env("RAYCI_IMAGE_SCAN") == "1"
+    instance_type: small
+    soft_fail: true
+    timeout_in_minutes: 1
+    tags:
+      - docker
+      - oss
+      - skip-on-premerge
+    commands:
+      - echo "sleeping past the 1-minute timeout"; sleep 600
+    depends_on:
+      - forge
+
   - label: ":shield: trivy: stage vulnerability DBs"
     key: trivy_db
     if: build.env("RAYCI_IMAGE_SCAN") == "1"
@@ -84,7 +101,8 @@ steps:
     if: build.env("RAYCI_IMAGE_SCAN") == "1"
     instance_type: medium
     soft_fail: true
-    timeout_in_minutes: 60
+    # THROWAWAY: cut from 60 so SIGTERM lands while scan_images runs.
+    timeout_in_minutes: 5
     allow_dependency_failure: true
     tags:
       - docker
