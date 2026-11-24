@@ -38,6 +38,7 @@ from ray.data.datasource.file_based_datasource import FileShuffleConfig
 from ray.data.datasource.partitioning import HIVE_DEFAULT_PARTITION
 from ray.data.expressions import col
 from ray.data.tests.conftest import *  # noqa
+from ray.data.tests.delta_test_utils import MAPPED_TABLE_ROWS, write_mapped_table
 from ray.tests.conftest import *  # noqa
 
 deltalake = pytest.importorskip("deltalake")
@@ -703,6 +704,63 @@ def test_reads_with_v2_by_default(partitioned_table):
 
 def test_reads_with_v1_without_datasource_v2(partitioned_table):
     assert not _uses_v2(_read(partitioned_table, v2=False))
+
+
+@pytest.fixture
+def name_mapped_table(tmp_path) -> str:
+    path = str(tmp_path / "name_mapped")
+    write_mapped_table(path, "name")
+    return path
+
+
+@pytest.mark.parametrize(
+    "transform, expected",
+    [
+        (lambda ds: ds, lambda rows: rows),
+        # Log statistics and Parquet statistics are keyed by physical name.
+        (
+            lambda ds: ds.filter(expr=col("id") > 5),
+            lambda rows: [r for r in rows if r["id"] > 5],
+        ),
+        # The partition column comes from the log, not the file's copy of it.
+        (
+            lambda ds: ds.filter(expr=col("grp") == "a"),
+            lambda rows: [r for r in rows if r["grp"] == "a"],
+        ),
+        # A filter on a column with nested fields runs after renaming.
+        (
+            lambda ds: ds.filter(expr=col("s").is_null()),
+            lambda rows: [r for r in rows if r["s"] is None],
+        ),
+        (
+            lambda ds: ds.select_columns(["s", "extra"]),
+            lambda rows: [{"s": r["s"], "extra": r["extra"]} for r in rows],
+        ),
+    ],
+    ids=["all", "filter", "partition_filter", "nested_filter", "select"],
+)
+def test_reads_a_name_mapped_table(name_mapped_table, transform, expected):
+    """Data files name columns by physical name, nested fields too. They also
+    hold the partition column and a row-tracking column that aren't read, and
+    the first file lacks ``extra``, which is null-filled."""
+    ds = transform(_read(name_mapped_table))
+
+    assert _rows(ds) == sorted(
+        expected(MAPPED_TABLE_ROWS), key=lambda row: repr(sorted(row.items()))
+    )
+
+
+def test_name_mapped_statistics_skip_files(name_mapped_table):
+    """The log keys statistics by physical name, nested fields as dotted
+    paths. They're renamed to logical names when loaded, so log-statistics
+    skipping finds them; the footer reads get the filter in physical names."""
+    add_actions = load_add_actions(deltalake.DeltaTable(name_mapped_table))
+    assert {"min.id", "max.s.n", "null_count.extra"} <= set(add_actions.column_names)
+
+    rows = _list_files(_read(name_mapped_table), predicate=col("id") > 5)
+
+    assert {posixpath.dirname(row["__path"]) for row in rows} == {"col-grp=b"}
+    assert _read(name_mapped_table).count() == len(MAPPED_TABLE_ROWS)
 
 
 if __name__ == "__main__":
